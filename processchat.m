@@ -1,6 +1,11 @@
 function processchat(inputhdf5file,outputhdf5file)
 warning off all
+%%% TRITC is a flurophore, this is loading the particular channel
+%%% expression out of their microscope
 a.chat=permute(hdf5read(inputhdf5file,'/TRITC'),[3 2 1]);
+%%%order = : y x z
+%%% permute rearranges dimensions of the array, so this is reordering the
+%%% pixel values is some non-descript way?
 [chat]=processchatNN(a.chat);
 clear a
 chatX=chat.chatX';

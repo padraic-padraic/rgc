@@ -27,6 +27,7 @@ gpu=['gpu' num2str(gpunum)];
 
 
 rawdata=single(permute(hdf5read(inputhdf5file,'/TRITC'),[2 3 1]));
+%%%order : y z x
 rawsize=size(rawdata);
 load bandCNN.mat
 onesidex = 22; onesidey = 22; onesidez = 3;
@@ -82,6 +83,7 @@ cns done;
 delete(['/tmp/' gpu 'lock']);
 
 TRITC=permute(allout,[2 3 1]);
+%%%order: z x y
 save(outputhdf5file,'TRITC','-v7.3');
 
 catch

@@ -7,15 +7,46 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 function rgcAnalyzer(arborFileName,OnSACFilename,OffSACFilename,voxelRes,conformalJump)
 % read the arbor trace file - add 1 to node positions because FIJI format for arbor tracing starts from 0
-[nodes,edges,radii,nodeTypes,abort] = readArborTrace(arborFileName,[-1 0 1 2 3 4 5]); nodes = nodes + 1;
-arborBoundaries(1) = min(nodes(:,1)); arborBoundaries(2) = max(nodes(:,1));
-arborBoundaries(3) = min(nodes(:,2)); arborBoundaries(4) = max(nodes(:,2));
-%generate the SAC surfaces from annotations
-thisVZminmesh = fitSurfaceToSACAnnotation(OnSACFilename);
-thisVZmaxmesh = fitSurfaceToSACAnnotation(OffSACFilename);
-% find conformal maps of the ChAT surfaces onto the median plane
-surfaceMapping = calcWarpedSACsurfaces(thisVZminmesh,thisVZmaxmesh,arborBoundaries,conformalJump);
-warpedArbor = calcWarpedArbor(nodes,edges,radii,surfaceMapping,voxelRes,conformalJump);
+cached_on_name=strcat(OnSACFilename(1:findstr(OnSACFilename,'.txt')-1), '-', num2str(conformalJump))
+cached_off_name=strcat(OffSACFilename(1:findstr(OffSACFilename,'.txt')-1), '-', num2str(conformalJump))
+cached_arbor_name=arborFileName(1:length(arborFileName)-4)
+disp('Load warped surfaces')
+[warped_success,surfaceMapping] = loadWarpedSurfaces(cached_on_name, cached_off_name, cached_arbor_name, conformalJump);
+if warped_success~=true
+    disp('Read in Arbor Trace')
+    [nodes,edges,radii,nodeTypes,abort] = readArborTrace(arborFileName,[-1 0 1 2 3 4 5]); nodes = nodes + 1;
+    arborBoundaries(1) = min(nodes(:,1)); arborBoundaries(2) = max(nodes(:,1));
+    arborBoundaries(3) = min(nodes(:,2)); arborBoundaries(4) = max(nodes(:,2));
+    [surface_success, thisVZminmesh, thisVZmaxmesh] = loadSurfaces(cached_on_name, cached_off_name);
+    if surface_success ~= true
+        %generate the SAC surfaces from annotations
+        thisVZminmesh = fitSurfaceToSACAnnotation(OnSACFilename);
+        disp('Loaded on and fit surface')
+        thisVZmaxmesh = fitSurfaceToSACAnnotation(OffSACFilename);
+        disp('Loaded off and fit surface')
+        writeSurfaces(cached_on_name, cached_off_name, thisVZminmesh, thisVZmaxmesh);
+        disp('Saved these fit grids')
+    end
+    % find conformal maps of the ChAT surfaces onto the median plane
+    disp('Calc warped surface mapping')
+    surfaceMapping = calcWarpedSACsurfaces(thisVZminmesh,thisVZmaxmesh,arborBoundaries,conformalJump);
+    writeWarpedSurfaces(surfaceMapping, cached_on_name, cached_off_name, cached_arbor_name, conformalJump);
+    disp('Unwarp Arbor')
+    warpedArbor = calcWarpedArbor(nodes,edges,radii,surfaceMapping,voxelRes,conformalJump);
+    writeWarpedArbor(warpedArbor, cached_arbor_name);
+else
+    disp('Loaded cached surface')
+    [arbor_success, warpedArbor] = loadWarpedArbor(cached_arbor_name, surfaceMapping, conformalJump);
+    if arbor_success ~= true
+        disp('Calculating arbor')
+        [nodes,edges,radii,nodeTypes,abort] = readArborTrace(arborFileName,[-1 0 1 2 3 4 5]); nodes = nodes + 1;
+        warpedArbor = calcWarpedArbor(nodes,edges,radii,surfaceMapping,voxelRes,conformalJump);
+        writeWarpedArbor(warpedArbor, cached_arbor_name);
+    else
+        disp('Loaded cached arbor')
+    end
+end
+
 % hard-coded representation and filtering parameters used in arbor density representation (ADR) calculation
 % filter parameters were optimized based on representation size choices to minimize discrepancy with genetic
 % labels as explained in the manuscript
@@ -35,84 +66,56 @@ kbX(isnan(kbX))=0; kbX=kbX/max(kbX); kbY(isnan(kbY))=0; kbY=kbY/max(kbY);
 % arbor trace is aligned with the main diagonal in returnDist3d for storage/computation efficiency
 xyFilter = imrotate(kbX'*kbY,45,'bicubic','crop');lpfilt=permute(repmat(xyFilter,[1 1 zLen]),[3 1 2]);
 % calculate the ADR and use nodes reassigned to edge centers weighted by edge masses
+disp('Calc 3D Dist')
 [dist3d,nodes,density] = calc3dDist(warpedArbor.nodes,warpedArbor.edges,warpedArbor.medVZmin,warpedArbor.medVZmax,repLenX,zLen,xLen,zExt,xExt,lpfilt);
+assignin('base','dist3d',dist3d);
 % calculate depth profile directly from the arbor and save as png image
 gridPointCount = 120; % number of points on the z-profile plot
 [token,remain] = strtok(datestr(clock),' '); commonSaveFileName = strcat(arborFileName,token,'_',remain(2:end));
-saveZProfile(warpedArbor.medVZmin,warpedArbor.medVZmax,density,nodes,voxelRes(3),zExt,gridPointCount,commonSaveFileName);
+z_profile = saveZProfile(warpedArbor.medVZmin,warpedArbor.medVZmax,density,nodes,voxelRes(3),zExt,gridPointCount,commonSaveFileName);
+Xup = 120*voxelRes(3)/2;
+coords = linspace(-1*Xup, Xup, 120);
+out = zeros(120,2);
+for i=1:120
+    out(i,1)=coords(i);
+    out(i,2)=z_profile(i);
+end
+dlmwrite(strcat(cached_arbor_name,'-zdist.txt'), out);
 %% load allDist here -- all arbor distributions for classification
-%% to find how the new cell will be clustered
+% %% to find how the new cell will be clustered
+% load('arborDensities20x20x120_cells1to91.mat');
+% load('arborDensities20x20x120_cells92to182.mat');
+% load('arborDensities20x20x120_cells183to273.mat');
+% load('arborDensities20x20x120_cells274to363.mat');
+% allDist = cat(2,allDist_1to91,allDist_92to182,allDist_183to273,allDist_274to363);
+% labels=readLabels();
 % myLinkage = elinkage(pdist([allDist dist3d(:)]','euclidean')); myLinkage(:,3) = myLinkage(:,3)/myLinkage(end,3);
-% labelDendrogram(myLinkage,readLabels,commonSaveFileName);
+% % clusterIDsForKnownCells = labels(1:363);
+% positions = labelDendrogram(myLinkage,labels,commonSaveFileName);
+% knownCellPositions = zeros(1,363);
+% labelInts = containers.Map;
+% labelInts('a')=1;labelInts('b')=2;labelInts('c')=3;labelInts('d')=4;labelInts('e')=5;
+% labelInts('f')=6;labelInts('g')=7;labelInts('h')=8;labelInts('i')=9;labelInts('u')=10;
+% labelInts('v')=11;labelInts('w')=12;labelInts('x')=13;labelInts('y')=14;labelInts('z')=15;
+% clusterIDsForKnownCells = zeros(1,363);
+% counter=1;
+% for i=(1:size(positions,2))
+%     if labels{positions(i)}~='N'
+%         positions(counter)=i;
+%         clusterIDsForKnownCells(counter)=labelInts(labels{positions(i)});
+%         counter = counter +1;
+%     end
+% end
 % [AR,RI,MI,HI,rowSplits,columnSplits,typeConfusions] = reportConfusionsAndRI(c1,c2);
+% maxCutLevel=0.1;
 % hardClusterStats = cutDendrogram(myLinkage,clusterIDsForKnownCells,knownCellPositions,maxCutLevel);
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-function [nodes,edges,radii,nodeTypes,abort] = readArborTrace(fileName,validNodeTypes)
-abort = false; nodes = []; edges = []; nodeTypes = [];
-validNodeTypes = setdiff(validNodeTypes,1); % 1 is for soma
-% read the SWC file
-[nodeID, nodeType, xPos, yPos, zPos, radii, parentNodeID] = textread(fileName, '%u%d%f%f%f%f%d','commentstyle', 'shell');
-% every tree should start from a node of type 1 (soma)
-nodeType(find(parentNodeID==-1))=1;
-% find the first soma node in the list (more than one node can be labeled as soma)
-firstSomaNode = find(nodeType == 1 & parentNodeID == -1, 1);
-% find the average position of all the soma nodes, and assign it as THE soma node position
-somaNodes = find(nodeType == 1);
-somaX = mean(xPos(somaNodes)); somaY = mean(yPos(somaNodes)); somaZ = mean(zPos(somaNodes));
-somaRadius = mean(radii(somaNodes));
-xPos(firstSomaNode) = somaX; yPos(firstSomaNode) = somaY; zPos(firstSomaNode) = somaZ;
-radii(firstSomaNode) = somaRadius;
-% change parenthood so that there is a single soma parent
-parentNodeID(ismember(parentNodeID,somaNodes)) = firstSomaNode;
-% delete all the soma nodes except for the firstSomaNode
-nodesToDelete = setdiff(somaNodes,firstSomaNode);
-nodeID(nodesToDelete)=[]; nodeType(nodesToDelete)=[];
-xPos(nodesToDelete)=[]; yPos(nodesToDelete)=[]; zPos(nodesToDelete)=[];
-radii(nodesToDelete)=[]; parentNodeID(nodesToDelete)=[];
-% reassign node IDs due to deletions
-for kk = 1:numel(nodeID)
-  while ~any(nodeID==kk)
-    nodeID(nodeID>kk) = nodeID(nodeID>kk)-1;
-    parentNodeID(parentNodeID>kk) = parentNodeID(parentNodeID>kk)-1;
-  end
-end
-% of all the nodes, retain the ones indicated in validNodeTypes
-% ensure connectedness of the tree if a child is marked as valid but not some of its ancestors
-validNodes = nodeID(ismember(nodeType,validNodeTypes));
-additionalValidNodes = [];
-for kk = 1:numel(validNodes)
-  thisParentNodeID = parentNodeID(validNodes(kk)); thisParentNodeType = nodeType(thisParentNodeID);
-  while ~ismember(thisParentNodeType,validNodeTypes)
-    if thisParentNodeType == 1
-      break;
-    end
-    additionalValidNodes = union(additionalValidNodes, thisParentNodeID); nodeType(thisParentNodeID) = validNodeTypes(1);
-    thisParentNodeID = parentNodeID(thisParentNodeID); thisParentNodeType = nodeType(thisParentNodeID);
-  end
-end
-% retain the valid nodes only
-% the soma node is always a valid node to ensure connectedness of the tree
-validNodes = [firstSomaNode; validNodes; additionalValidNodes']; validNodes = unique(validNodes);
-nodeID = nodeID(validNodes); nodeType = nodeType(validNodes); parentNodeID = parentNodeID(validNodes);
-xPos = xPos(validNodes); yPos = yPos(validNodes); zPos = zPos(validNodes); radii = radii(validNodes);
-% reassign node IDs after deletions
-for kk = 1:numel(nodeID)
-  while ~any(nodeID==kk)
-    nodeID(nodeID>kk) = nodeID(nodeID>kk)-1;
-    parentNodeID(parentNodeID>kk) = parentNodeID(parentNodeID>kk)-1;
-  end
-end
-% return the resulting tree data
-nodes = [xPos yPos zPos];
-edges = [nodeID parentNodeID];
-edges(any(edges==-1,2),:) = [];
-nodeTypes = unique(nodeType)';
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 function vzmesh = fitSurfaceToSACAnnotation(annotationFilename)
 % read the annotation file
-[t1,t2,t3,t4,t5,x,z,y] = textread(annotationFilename, '%u%u%d%d%d%d%d%d','headerlines',1);
+% [t1,t2,t3,t4,t5,x,z,y] = textread(annotationFilename, '%u%u%d%d%d%d%d%d','headerlines',1);
+% [x,y,z] = textread(annotationFilename, '%d%d%d');
+[x,y,z] = readAnnotationsFile(annotationFilename);
 % add 1 to x and z, butnot to y because FIJI point tool starts from 0 for pixels of an image
 % but from 1 for slice of a stack
 x=x+1; z=z+1;
@@ -128,9 +131,12 @@ vzmesh=interp2(xgrid,ygrid,zgrid,xi,yi,'*linear',mean(zgrid(:)));
 function surfaceMapping = calcWarpedSACsurfaces(thisVZminmesh,thisVZmaxmesh,arborBoundaries,conformalJump)
 minXpos = arborBoundaries(1); maxXpos = arborBoundaries(2); minYpos = arborBoundaries(3); maxYpos = arborBoundaries(4);
 % retain the minimum grid of SAC points, where grid resolution is determined by conformalJump
-thisx = [max(minXpos-1,1):conformalJump:min(maxXpos+1,size(thisVZmaxmesh,1))];
-thisy = [max(minYpos-1,1):conformalJump:min(maxYpos+1,size(thisVZmaxmesh,2))];
-thisminmesh=thisVZminmesh(thisx,thisy); thismaxmesh=thisVZmaxmesh(thisx,thisy);
+minmax_x = min(size(thisVZminmesh,1), size(thisVZmaxmesh,1));
+minmax_y = min(size(thisVZminmesh,2), size(thisVZmaxmesh,2));
+thisx = [max(minXpos-1,1):conformalJump:min(maxXpos+1,minmax_x)];
+thisy = [max(minYpos-1,1):conformalJump:min(maxYpos+1,minmax_y)];
+thisminmesh=thisVZminmesh(thisx,thisy); 
+thismaxmesh=thisVZmaxmesh(thisx,thisy);
 % calculate the traveling distances on the diagonals of the two SAC surfaces - this must be changed to Dijkstra's algorithm for exact results
 [mainDiagDistMin, skewDiagDistMin] = calculateDiagLength(thisx,thisy,thisminmesh);
 [mainDiagDistMax, skewDiagDistMax] = calculateDiagLength(thisx,thisy,thismaxmesh);
@@ -401,7 +407,10 @@ nz = (n/2+1) + n*zSamples;
 nxt = min(m,max(1,round((m/2+1)+m*xSamples))); nyt = min(m,max(1,round((m/2+1)+m*ySamples)));
 % loop over samples in kernel
 for lz = -(Wz-1)/2:(Wz-1)/2,
- nzt = round(nz+lz); zpos=Sz*((nz-nzt)-(-Wz/2))+1; kwz=F_kbZ(round(zpos))'; nzt = min(max(nzt,1),n);
+ nzt = round(nz+lz); 
+ zpos=Sz*((nz-nzt)-(-Wz/2))+1; 
+ kwz=F_kbZ(round(zpos))'; 
+ nzt = min(max(nzt,1),n);
  linearIndices = sub2ind([n m m],nzt,nxt,nyt); %nzt+(nxt-1)*n+(nyt-1)*n*m;   % compute linear indices
  interpolated = interpolated+sparse(linearIndices,1,density.*kwz,n*m*m,1);   % use sparse matrix to turn k-space trajectory into 2D matrix
 end
@@ -438,7 +447,7 @@ f=f(zoffset+1:zoffset+u,xoffset+1:xoffset+v,yoffset+1:yoffset+w);
 end
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-function saveZProfile(medVzmin,medVzmax,density,nodes,zRes,zExt,gridPointCount,saveName)
+function z_profile = saveZProfile(medVzmin,medVzmax,density,nodes,zRes,zExt,gridPointCount,saveName)
 % express z-positions in the universal z-coordinate
 allZpos = (nodes(:,3)/zRes - medVzmin)/(medVzmax - medVzmin);
 % divide z-positions by the total z-extent so the region of interest is within [-0.5, 0.5]
@@ -451,11 +460,13 @@ bins = [-zExt/2:zExt/gridPointCount:zExt/2-zExt/gridPointCount];
 % plot the profile
 figure;
 Xup = gridPointCount*zRes/2; Xlow = -Xup;
+assignin('base', 'xup', Xup);
 h=plot(bins*(gridPointCount*zRes/zExt),zDist); set(h,'LineWidth',2); xlim([[Xlow Xup]]);
 ylabel('Dendritic length distribution','FontSize',14); xlabel(strcat('depth in IPL (\mu','m)'),'FontSize',14);
 h = gcf; pixelsPerInch = 70; set(h,'Color','w','PaperUnits', 'inches', 'PaperPosition', [0 0 700 400]/pixelsPerInch); set(gca,'box','off');
 % save the profile and close the plot;
 print(gcf,'-dpng',sprintf('-r%d',pixelsPerInch), strcat(saveName,'_zProfile.png')); close;
+z_profile = zDist;
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 function interpolated = gridder1d(zSamples,density,n,Wz,betaZ)
@@ -508,20 +519,24 @@ f=f(zoffset+1:zoffset+u);
 end
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-function labelDendrogram(thisLinkage,labels,colorLabels,saveName)
-figure;h = dendrogram(thisLinkage,0);
-% cell IDs in the dendrogram leaves
-curLabels=get(gca,'XTickLabel'); for kk = 1:size(curLabels,1); numCurLabels(kk) = str2num(curLabels(kk,:)); end;
-% label leaves
-for kk = 1:size(curLabels,1);
-  x = kk; y = -0.01; t=text(x,y,labels{numCurLabels(kk)},'Color',colorLabels{numCurLabels(kk)});
-  set(t,'HorizontalAlignment','right','VerticalAlignment','top'); %,'Rotation',90);
-end
-%Prettier
-set(gca,'XLim',[0,size(thisLinkage,1)+2],'YLim',[0,1.05], 'XTickLabel', {}, 'XTick',[], 'YTickLabel', {'0','0.2','0.4','0.6','0.8','1'}, 'YTick',[0:0.2:1]);
-for kk = 1:numel(h); set(h(kk),'Color','black','LineWidth',2); end;
-pixelsPerInch = 70; set(gcf,'Color','w','PaperUnits', 'inches', 'PaperPosition',[100 100 4000 800]/pixelsPerInch); set(gca,'box','off');
-print(gcf,'-dpng',sprintf('-r%d',pixelsPerInch), strcat(saveName,'_dendrogram.png')); close;
+%function labelDendrogram(thisLinkage,labels,colorLabels,saveName)
+function positions = labelDendrogram(thisLinkage,labels,saveName)
+
+    figure;h = dendrogram(thisLinkage,0);
+    % cell IDs in the dendrogram leaves
+    curLabels=get(gca,'XTickLabel'); for kk = 1:size(curLabels,1); numCurLabels(kk) = str2num(curLabels(kk,:)); end;
+    % label leaves
+    assignin('base','numCurLabels',numCurLabels);
+    for kk = 1:size(curLabels,1);
+      x = kk; y = -0.01; t=text(x,y,labels{numCurLabels(kk)});%,'Color',colorLabels{numCurLabels(kk)});
+      set(t,'HorizontalAlignment','right','VerticalAlignment','top'); %,'Rotation',90);
+    end
+    %Prettier
+    set(gca,'XLim',[0,size(thisLinkage,1)+2],'YLim',[0,1.05], 'XTickLabel', {}, 'XTick',[], 'YTickLabel', {'0','0.2','0.4','0.6','0.8','1'}, 'YTick',[0:0.2:1]);
+    for kk = 1:numel(h); set(h(kk),'Color','black','LineWidth',2); end;
+    pixelsPerInch = 70; set(gcf,'Color','w','PaperUnits', 'inches', 'PaperPosition',[100 100 4000 800]/pixelsPerInch); set(gca,'box','off');
+    print(gcf,'-dpng',sprintf('-r%d',pixelsPerInch), strcat(saveName,'_dendrogram.png')); close;
+    positions = numCurLabels;
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 function labels=readLabels
@@ -737,106 +752,6 @@ for merges = 1:(n-2);
             ed(i, k) = ((m1+m3)*ed(i,k) + (m2+m3)*ed(j,k) - m3*ed(i,j))/m;
             ed(k, i) = ed(i, k);
         end;
-    end;
-    
-   
-    %update cluster data, merge j into i and delete j
-    ed(j, :) = [];
-    ed(:, j) = [];
-    clsizes(i) = m12;
-    clsizes(j) = [];
-    clindex(i) = n + merges;
-    clindex(j) = [];
-    nclus = n - merges;
-    
-    %order the leaves so that ht incr left to right
-    if L(merges, 1) > L(merges, 2);
-        ij = L(merges, 1);
-        L(merges, 1) = L(merges, 2);
-        L(merges, 2) = ij;
-    end;
-end;
-
-%handle the final merge
-L(n-1, :) = [clindex(1), clindex(2), ed(1, 2)];
-if L(n-1, 1) > L(n-1, 2);
-    ij = L(n-1, 1);
-    L(n-1, 1) = L(n-1, 2);
-    L(n-1, 2) = ij;
-end;
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-function L = elinkage(y, alpha)
-%ELINKAGE Minimum energy clustering for Matlab
-%
-% y      data matrix with observations in rows, 
-%        or distances produced by pdist
-% alpha  power of Euclidean distance, 0<alpha<=2
-%        default alpha=1
-%
-% Agglomerative hierarchical clustering by minimum 
-% energy method, using L-W recursion, for Matlab 7.0.
-% See the contributed package "energy" for R, and its 
-% reference manual, for details:
-% http://cran.us.r-project.org/src/contrib/PACKAGES.html
-% http://cran.us.r-project.org/doc/packages/energy.pdf
-% Reference: 
-% Szekely, G.J. and Rizzo, M.L. (2005), Hierarchical 
-% clustering via joint between-within distances: 
-% extending Ward's minimum variance method, Journal 
-% of Classification, Vol. 22 (2).
-% Email:
-% gabors @ bgnet.bgsu.edu, mrizzo @ bgnet.bgsu.edu
-% Software developed and maintained by: 
-%     Maria Rizzo, mrizzo @ bgnet.bgsu.edu                    
-% Matlab version 1.0.0 created: 12-Dec-2005    
-% License: GPL 2.0 or later
-
-%%% initialization
-if nargin < 2
-    alpha = 1.0;
-end;
-
-%%% if n==1, y is distance, output from pdist()
-[n, d] = size(y);            %n obs. in rows
-if n == 1  %distances in y
-    ed = 2 .* squareform(y) .^alpha;
-else       %data matrix
-    ed = 2 .* (squareform(pdist(y)).^alpha);
-end;
-n = length(ed);
-clsizes = ones(1, n);        %cluster sizes
-clindex = 1:n;               %cluster indices
-L = zeros(n-1, 3);           %linkage return value
-nclus = n;
-
-for merges = 1:(n-2);
-
-    %find clusters at minimum e-distance  
-    b = ones(nclus, 1) .* (ed(1,2) + 1);
-    B = ed + diag(b);
-    [colmins, mini] = min(B);
-    [minmin, j] = min(colmins);
-    i = mini(j);
-    
-    %cluster j will be merged into i
-    %update the linkage matrix
-    L(merges, 1) = clindex(i);
-    L(merges, 2) = clindex(j);
-    L(merges, 3) = ed(i, j);
-    
-    %update the cluster distances
-    m1 = clsizes(i);
-    m2 = clsizes(j);
-    m12 = m1 + m2;
-    
-    for k = 1:nclus;
-    	if (k ~= i && k ~= j);	
-    	    m3 = clsizes(k);
-            m = m12 + m3;
-            ed(i, k) = ((m1+m3)*ed(i,k) + (m2+m3)*ed(j,k) - m3*ed(i,j))/m;
-            ed(k, i) = ed(i, k);
-        end; 
     end;
     
    
